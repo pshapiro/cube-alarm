@@ -112,6 +112,34 @@ class PiAudioManager:
         except Exception as e:
             logger.debug(f"ALSA device detection failed: {e}")
         return '0', '0'
+
+    def _ensure_analog_output(self) -> None:
+        """Ensure the Raspberry Pi routes audio to the analog jack.
+
+        Some Raspberry Pi models reset their default audio output to HDMI on
+        reboot.  Use ``amixer`` to force the output back to the headphone jack
+        and make sure the channel is unmuted.  Failures are logged but do not
+        raise exceptions so alarm playback can continue even if the command is
+        unavailable.
+        """
+        if not self._command_exists('amixer'):
+            return
+
+        try:
+            subprocess.run(
+                ['amixer', 'cset', 'numid=3', '1'],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=True,
+            )
+            subprocess.run(
+                ['amixer', 'sset', 'Headphone', 'unmute'],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=True,
+            )
+        except Exception as e:
+            logger.debug(f"amixer configuration failed: {e}")
     
     def play_alarm_sound(self, alarm_id: str, sound_file: str = None) -> bool:
         """Play alarm sound continuously until stopped."""
@@ -137,7 +165,18 @@ class PiAudioManager:
         logger.info(f"🔊 DEBUG: Sound file exists: {os.path.exists(sound_path)}")
         logger.info(f"🔊 DEBUG: Current working directory: {os.getcwd()}")
         logger.info(f"🔊 DEBUG: Environment variables: PULSE_RUNTIME_PATH={os.environ.get('PULSE_RUNTIME_PATH')}, XDG_RUNTIME_DIR={os.environ.get('XDG_RUNTIME_DIR')}")
-        
+
+        # Re-detect ALSA device on each playback in case the system booted
+        # before audio devices were fully initialized (common after power
+        # cycles).  This ensures we always target the actual analog output
+        # rather than falling back to the HDMI default.
+        self.alsa_card, self.alsa_device = self._detect_alsa_device()
+        self.alsa_output = f"plughw:{self.alsa_card},{self.alsa_device}"
+        logger.info(f"🔊 DEBUG: Using ALSA output {self.alsa_output}")
+
+        # Ensure the headphone jack is the active output and unmuted
+        self._ensure_analog_output()
+
         # Create stop event for this alarm
         stop_event = threading.Event()
         self.stop_events[alarm_id] = stop_event
